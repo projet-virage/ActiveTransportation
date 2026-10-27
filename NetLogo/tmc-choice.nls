@@ -1,0 +1,202 @@
+;; =============================================================================
+;; tmc-choice.nls -- standardisation, MNL utilities, model step
+;; Python reference: prepare_static_calibration_data, standardized,
+;; reset_trial_state, model_step, fast_peer_share, compute_mode_shares and
+;; PersonAgent.compute_mode_choice.
+;; =============================================================================
+
+;; -----------------------------------------------------------------------------
+;; prepare_static_calibration_data: z-score statistics (population std, ddof 0).
+;; The four travel times share ONE mean/std computed over all their finite values.
+;; -----------------------------------------------------------------------------
+
+to prepare-static-calibration-data
+  let all-persons sort persons
+  let times []
+  foreach all-persons [ a ->
+    foreach [(list time-car transit-time time-bike time-walk)] of a [ v ->
+      if is-number? v [ set times lput v times ]
+    ]
+  ]
+  set std-stats table:make
+  let time-stats mean-std times
+  foreach ["time_car" "time_transit" "time_bike" "time_walk"] [ c -> table:put std-stats c time-stats ]
+  table:put std-stats "income" mean-std map [ a -> [income] of a ] all-persons
+  table:put std-stats "age" mean-std map [ a -> [age] of a ] all-persons
+  table:put std-stats "pop_dens" mean-std map [ a -> [pop-dens] of a ] all-persons
+  table:put std-stats "proximity_to_bikelane" mean-std map [ a -> [proximity-to-bikelane] of a ] all-persons
+
+  set agents-by-da table:make
+  foreach all-persons [ a ->
+    if [age-group] of a = "adult" [
+      let k [da-id] of a
+      table:put agents-by-da k lput a table:get-or-default agents-by-da k []
+    ]
+  ]
+end
+
+to-report mean-std [values]
+  if empty? values [ report [0 0] ]
+  let m mean values
+  report list m sqrt (mean map [ v -> (v - m) * (v - m) ] values)
+end
+
+to-report standardized [v name]
+  if not is-number? v [ report false ]
+  let s table:get std-stats name
+  report ifelse-value item 1 s > 0 [ (v - item 0 s) / item 1 s ] [ 0 ]
+end
+
+;; person reporter: total transit time (false if any leg is missing)
+to-report transit-time
+  if is-number? time-home-stm and is-number? time-stm-stm and is-number? time-stm-work [
+    report time-home-stm + time-stm-stm + time-stm-work
+  ]
+  report false
+end
+
+;; -----------------------------------------------------------------------------
+;; Simulation steps
+;; -----------------------------------------------------------------------------
+
+to reset-trial-state
+  set social-interaction? false
+  ask persons [
+    set peer-bike-share 0
+    set mode-choice ""
+    set u-auto 0
+    set u-transit 0
+    set u-bike 0
+    set u-walk 0
+  ]
+end
+
+to model-step
+  ask persons [ compute-mode-choice ]
+  ;; fast_peer_share: computed after every agent has chosen
+  ask persons [
+    set peer-bike-share ifelse-value any? peers [ count peers with [ mode-choice = "bike" ] / count peers ] [ 0 ]
+  ]
+end
+
+;; run_transport_simulation: n-steps, social influence from the 2nd step on
+to run-simulation
+  require-betas
+  reset-trial-state
+  reset-ticks
+  clear-mode-plot
+  repeat n-steps [ go ]
+  print-mode-counts "Simulated counts"
+end
+
+;; one model step (button): the first step after a reset ignores peers
+to go
+  require-betas
+  set social-interaction? ticks > 0
+  model-step
+  tick
+  color-persons
+  plot-mode-counts
+end
+
+to require-betas
+  if betas = false [ error "No coefficients: press load-betas or calibrate first." ]
+end
+
+;; compute_mode_shares: counts per DA, in auto / transit / bike / walk order
+to-report compute-mode-shares
+  let result table:make
+  foreach table:keys agents-by-da [ k ->
+    let choices map [ a -> [mode-choice] of a ] table:get agents-by-da k
+    table:put result k map [ m -> length filter [ c -> c = m ] choices ] mode-names
+  ]
+  report result
+end
+
+to-report mode-counts
+  report map [ m -> count persons with [ mode-choice = m ] ] mode-names
+end
+
+;; -----------------------------------------------------------------------------
+;; PersonAgent.compute_mode_choice
+;; Unavailable mode-names have utility `false` (-inf in Python). The chosen mode is
+;; the argmax of the softmax probabilities, i.e. of the utilities (first mode
+;; wins ties); Python falls back to a random mode when the exp sum is 0 or
+;; infinite, reproduced with the float64 exp underflow/overflow limits.
+;; -----------------------------------------------------------------------------
+
+to compute-mode-choice
+  let b betas
+  if not social-interaction? [
+    set z-auto standardized time-car "time_car"
+    set z-transit standardized transit-time "time_transit"
+    set z-bike standardized time-bike "time_bike"
+    set z-walk standardized time-walk "time_walk"
+    set z-income standardized income "income"
+    set z-age standardized age "age"
+    set z-dens standardized pop-dens "pop_dens"
+    set z-prx standardized proximity-to-bikelane "proximity_to_bikelane"
+
+    if z-auto = false [ set auto-available? false ]
+    if z-transit = false [ set transit-available? false ]
+    if z-bike = false [ set bike-available? false ]
+    if z-walk = false [ set walk-available? false ]
+
+    set u-auto ifelse-value auto-available? [
+      item 30 b
+      + item 0 b * z-auto + item 1 b * z-age + item 2 b * gender + item 3 b * z-income
+      + item 4 b * z-dens + item 5 b * z-age * z-auto + item 6 b * z-income * z-auto
+    ] [ false ]
+
+    set u-transit ifelse-value transit-available? [
+      item 31 b
+      + item 7 b * z-transit + item 8 b * z-age + item 9 b * gender + item 10 b * z-income
+      + item 11 b * z-dens + item 12 b * z-age * z-transit + item 13 b * z-income * z-transit
+    ] [ false ]
+
+    set u-walk ifelse-value walk-available? [
+      item 22 b * z-walk + item 23 b * z-age + item 24 b * gender + item 25 b * z-income
+      + item 26 b * z-dens + item 27 b * z-age * z-walk + item 28 b * z-income * z-walk
+    ] [ false ]
+  ]
+
+  ;; the bicycle utility is the only one updated once social interaction is on
+  set u-bike ifelse-value bike-available? [
+    item 32 b
+    + item 14 b * z-bike + item 15 b * z-age + item 16 b * gender + item 17 b * z-income
+    + item 18 b * z-dens + item 19 b * z-prx + item 20 b * z-age * z-bike
+    + item 21 b * z-income * z-bike + item 29 b * peer-bike-share
+  ] [ false ]
+
+  let us (list u-auto u-transit u-bike u-walk)
+  let avail filter is-number? us
+  ifelse empty? avail or max avail > 709.78 or max avail < -745.13
+    [ set mode-choice one-of mode-names ]
+    [ set mode-choice item (position max avail us) mode-names ]
+end
+
+;; -----------------------------------------------------------------------------
+;; Display and plots
+;; -----------------------------------------------------------------------------
+
+to-report mode-color [m]
+  report item (position m mode-names) (list red sky green orange)
+end
+
+to color-persons
+  ask persons [ set color ifelse-value mode-choice = "" [ grey ] [ mode-color mode-choice ] ]
+end
+
+to clear-mode-plot
+  set-current-plot "Mode counts"
+  clear-plot
+end
+
+to plot-mode-counts
+  set-current-plot "Mode counts"
+  (foreach mode-names mode-counts [ [m n] -> set-current-plot-pen m  plotxy ticks n ])
+end
+
+to print-mode-counts [title]
+  print (word title " [auto transit bike walk]: " mode-counts)
+end

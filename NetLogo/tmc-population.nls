@@ -1,0 +1,284 @@
+;; =============================================================================
+;; tmc-population.nls -- synthetic population, activation, density, peers
+;; Python reference: TransportModel.__init__, create_agents,
+;; assign_local_population_density, initialize_social_network and
+;; PersonAgent.assign_nodes.
+;; =============================================================================
+
+to setup-population
+  if not data-loaded? [ error "Run setup-data first." ]
+  ask workspots [ die ]
+  ask persons [ die ]
+  clear-all-plots
+  clear-output
+  ifelse seed = 0 [ random-seed new-seed ] [ random-seed seed ]
+  set social-interaction? false
+  no-display
+  reset-timer
+  create-agents                       log-step (word count persons " agents created")
+  assign-local-population-density     log-step "local population density"
+  ask persons [ assign-nodes ]        log-step "agents activated (homes, bike lanes, workplaces, STM)"
+  compute-all-travel-times sort persons
+  initialize-social-network           log-step (word "social network (" agents-without-peers " agents without peers)")
+  prepare-static-calibration-data
+  reset-trial-state
+  display
+  reset-ticks
+end
+
+;; -----------------------------------------------------------------------------
+;; create_agents
+;; -----------------------------------------------------------------------------
+
+;; [low high mean sd] for the 12 income brackets (under_10k ... 150k_plus)
+to-report income-distributions
+  report [
+    [0      9999   5000   2500]
+    [10000  19999  15000  2500]
+    [20000  29999  25000  2500]
+    [30000  39999  35000  2500]
+    [40000  49999  45000  2500]
+    [50000  59999  55000  2500]
+    [60000  69999  65000  2500]
+    [70000  79999  75000  2500]
+    [80000  89999  85000  2500]
+    [90000  99999  95000  2500]
+    [100000 149999 125000 12500]
+    [150000 250000 175000 25000]
+  ]
+end
+
+to create-agents
+  let n-das 0
+  foreach da-rows [ da ->
+    let car table:get da "Car"
+    let transit table:get da "Transit"
+    let bike table:get da "Bike"
+    let walk table:get da "Walk"
+    let res table:get da "res"
+    if (max-das = 0 or n-das < max-das)
+       and not (car = 0 and transit = 0 and bike = 0 and walk = 0)
+       and not empty? res [
+      set n-das n-das + 1
+      ;; Python's round() is round-half-to-even; with census counts in multiples
+      ;; of 5 and n_rep = 50, halves are frequent, so this matters.
+      let n-adults py-round (car / n-rep) + py-round (transit / n-rep)
+                 + py-round (bike / n-rep) + py-round (walk / n-rep)
+      let male-share table:get da "Male"
+      if male-share = false [
+        print (word "  warning: no gender data for DA " table:get da "DA_name" ", using 0.5")
+        set male-share 0.5
+      ]
+      let male-num py-round (male-share * n-adults)
+      let new-agents []
+      repeat male-num [ set new-agents lput (make-adult da 1 res) new-agents ]
+      repeat (n-adults - male-num) [ set new-agents lput (make-adult da 0 res) new-agents ]
+
+      ;; commute distance categories (floors, remainder in the 15-30 min class)
+      let n30 floor (table:get da "commute_time_30_45" * n-adults)
+      let n45 floor (table:get da "commute_time_45_60" * n-adults)
+      let n60 floor (table:get da "commute_time_more_60" * n-adults)
+      let commute-cats shuffle (sentence (n-values (n-adults - (n30 + n45 + n60)) [ 4000 ])
+                                         (n-values n30 [ 8000 ])
+                                         (n-values n45 [ 13000 ])
+                                         (n-values n60 [ 18000 ]))
+      (foreach (truncate-to commute-cats new-agents) (truncate-to new-agents commute-cats)
+        [ [c a] -> ask a [ set commute-distance c ] ])
+
+      ;; income categories (floors, remainder without income), truncated normal
+      let counts map [ s -> floor (s * n-adults) ] table:get da "income_shares"
+      let income-cats n-values (n-adults - sum counts) [ -1 ]
+      foreach range 12 [ k -> set income-cats sentence income-cats (n-values item k counts [ k ]) ]
+      set income-cats shuffle income-cats
+      (foreach (truncate-to income-cats new-agents) (truncate-to new-agents income-cats)
+        [ [k a] -> ask a [ set income ifelse-value k < 0 [ 0 ] [ truncnorm-income k ] ] ])
+    ]
+  ]
+end
+
+;; Python's zip() truncates to the shorter list; NetLogo's foreach does not.
+to-report truncate-to [l other-list]
+  report sublist l 0 (min list length l length other-list)
+end
+
+to-report make-adult [da g res]
+  let r one-of res
+  let new-agent nobody
+  create-persons 1 [
+    set age 15 + random 50          ;; random.randint(15, 64)
+    set gender g
+    set age-group "adult"
+    set da-id table:get da "DA_name"
+    set income 0
+    set home-res r
+    set home-x [x-m] of r
+    set home-y [y-m] of r
+    move-to r
+    set commute-distance false
+    set proximity-to-bikelane false
+    set pop-dens false
+    set shape "circle"
+    set size 1.5
+    set color grey
+    set relocated? false
+    set work-spot nobody
+    clear-location-state
+    set new-agent self
+  ]
+  report new-agent
+end
+
+;; Workplace and network-derived state (reset again on relocation)
+to clear-location-state
+  set work-x false
+  set work-y false
+  set home-node nobody
+  set work-node nobody
+  set home-stm-node nobody
+  set work-stm-node nobody
+  clear-travel-times
+  set peers no-turtles
+  set peer-bike-share 0
+  set mode-choice ""
+end
+
+to clear-travel-times
+  set time-car false
+  set time-walk false
+  set time-home-stm false
+  set time-stm-stm false
+  set time-stm-work false
+  set time-bike false
+  set auto-available? false
+  set walk-available? false
+  set transit-available? false
+  set bike-available? false
+end
+
+;; scipy truncnorm.rvs within [low, high], by rejection sampling (same
+;; distribution), then Python round().
+to-report truncnorm-income [k]
+  let spec item k income-distributions
+  loop [
+    let v random-normal item 2 spec item 3 spec
+    if v >= item 0 spec and v <= item 1 spec [ report py-round v ]
+  ]
+end
+
+;; Python round(): half to even
+to-report py-round [v]
+  let f floor v
+  let d v - f
+  if d > 0.5 [ report f + 1 ]
+  if d < 0.5 [ report f ]
+  report ifelse-value (f mod 2 = 0) [ f ] [ f + 1 ]
+end
+
+;; -----------------------------------------------------------------------------
+;; assign_local_population_density: agents within 1 km (self included, <= r,
+;; like KDTree.query_ball_point) x n_rep / pi km2
+;; -----------------------------------------------------------------------------
+
+to assign-local-population-density
+  let r 1000 / patch-m
+  ask persons [ set pop-dens (count persons in-radius r) * n-rep / pi ]
+end
+
+;; -----------------------------------------------------------------------------
+;; PersonAgent.assign_nodes (agents are activated in random order)
+;; -----------------------------------------------------------------------------
+
+to assign-nodes
+  set home-x [x-m] of home-res
+  set home-y [y-m] of home-res
+  move-to home-res
+  set home-node residence-node home-res
+  set proximity-to-bikelane nearest-lane-distance xcor ycor
+
+  if age-group = "adult" [
+    let i random-workplace-within home-x home-y commute-distance
+    if i != false [
+      set work-x item i wp-x
+      set work-y item i wp-y
+      set work-node nearest-node (mtm->x work-x) (mtm->y work-y)
+      hatch-workspots 1 [
+        setxy (mtm->x [work-x] of myself) (mtm->y [work-y] of myself)
+        set owner myself
+        set hidden? true
+        ask myself [ set work-spot myself ]
+      ]
+    ]
+  ]
+
+  set home-stm-node closest-stop-node home-node
+  if work-node != nobody [ set work-stm-node closest-stop-node work-node ]
+end
+
+;; random.choice(workplace_tree.query_ball_point([x, y], r)): uniform among the
+;; workplaces within r metres. Rejection sampling over all workplaces gives
+;; exactly that distribution; an exhaustive scan backs it up when the disc holds
+;; very few workplaces. Reports a workplace index or false.
+to-report random-workplace-within [x y r]
+  let n length wp-x
+  let r2 r * r
+  repeat 200000 [
+    let i random n
+    let del-x item i wp-x - x
+    let del-y item i wp-y - y
+    if del-x * del-x + del-y * del-y <= r2 [ report i ]
+  ]
+  let inside filter [ i -> (item i wp-x - x) ^ 2 + (item i wp-y - y) ^ 2 <= r2 ] range n
+  report ifelse-value empty? inside [ false ] [ one-of inside ]
+end
+
+;; -----------------------------------------------------------------------------
+;; initialize_social_network
+;; Candidates: agents living within interaction-radius of my home, or working
+;; within interaction-radius of my workplace. Peers: target_n drawn at random
+;; among the 2 x target_n most similar candidates (Gower distance).
+;; -----------------------------------------------------------------------------
+
+to initialize-social-network
+  let r interaction-radius / patch-m
+  ask persons [
+    let home-cands other persons in-radius r
+    let work-cands no-turtles
+    if work-spot != nobody [
+      set work-cands turtle-set [owner] of [other workspots in-radius r] of work-spot
+    ]
+    let cands remove self sort (turtle-set home-cands work-cands)
+    ifelse empty? cands [
+      set peers no-turtles
+    ] [
+      let target-n min list (min-peers + random (max-peers - min-peers + 1)) length cands
+      let pool-size min list length cands (2 * target-n)
+      let pool cands
+      if pool-size < length cands [
+        let ranked sort-by [ [a b] -> last a < last b ] (map list cands gower-distances cands)
+        set pool map first sublist ranked 0 pool-size
+      ]
+      set peers turtle-set n-of target-n pool
+    ]
+  ]
+end
+
+;; gower.gower_matrix(self, candidates, cat_features=[age:F, gender:T, income:F]).
+;; The gower package rescales numerical features by their range over the rows
+;; it is given (self + candidates); the global min-max normalisation done before
+;; in the notebook cancels out. Features with zero range contribute 0.
+to-report gower-distances [cands]
+  let ages map [ c -> [age] of c ] cands
+  let incomes map [ c -> [income] of c ] cands
+  let genders map [ c -> [gender] of c ] cands
+  let age-range (max fput age ages) - (min fput age ages)
+  let inc-range (max fput income incomes) - (min fput income incomes)
+  report (map [ [a g i] ->
+    ((ifelse-value age-range > 0 [ abs (a - age) / age-range ] [ 0 ])
+     + (ifelse-value g = gender [ 0 ] [ 1 ])
+     + (ifelse-value inc-range > 0 [ abs (i - income) / inc-range ] [ 0 ])) / 3
+  ] ages genders incomes)
+end
+
+to-report agents-without-peers
+  report count persons with [ not any? peers ]
+end

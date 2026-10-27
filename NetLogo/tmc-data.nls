@@ -1,0 +1,392 @@
+;; =============================================================================
+;; tmc-data.nls -- static data: world, GIS layers, census, networks, workplaces
+;; Python reference: notebook cells 6, 7, 10 and the TransportModel constructor.
+;; Everything here is loaded once by `setup-data` and reused by every
+;; population built afterwards (`setup-population`).
+;; =============================================================================
+
+;; Side length of a patch in metres. Patches are only a spatial index; all
+;; distances are computed from exact turtle coordinates.
+to-report patch-size-m
+  report 200
+end
+
+to setup-data
+  clear-all
+  set mode-names ["auto" "transit" "bike" "walk"]
+  set data-loaded? false
+  set betas false
+  set last-error false
+  no-display
+  reset-timer
+  set networks table:make
+  set max-edges 0
+  setup-world-and-nodes   log-step "world + network nodes"
+  load-edges "Edges_car.shp"     "car"      log-step "car network"
+  load-edges "Edges_walk.shp"    "walk"     log-step "walk network"
+  load-edges "Edges_bike.shp"    "bike"     log-step "bike network"
+  load-edges "Edges_transit.shp" "transit"  log-step "transit network"
+  load-stm-stops          log-step "STM stops"
+  load-bikelanes          log-step "bike lanes"
+  load-workplaces         log-step "workplaces"
+  load-census             log-step "census"
+  load-residences         log-step "residential parcels"
+  match-residences-to-das log-step "residential parcels -> DAs"
+  init-path-search
+  set path-caches table:from-list (list (list "car" table:make) (list "walk" table:make)
+                                        (list "bike" table:make) (list "transit" table:make))
+  gis:set-drawing-color grey + 2
+  gis:draw da-dataset 0.5
+  display
+  set data-loaded? true
+end
+
+to log-step [what]
+  print (word "[setup] " what ": " precision timer 1 " s")
+  reset-timer
+end
+
+;; -----------------------------------------------------------------------------
+;; World and coordinates
+;; The world covers the network envelope (it extends beyond the island) plus a
+;; 500 m margin. NetLogo units = patches; MTM metres <-> NetLogo conversions are
+;; exact linear maps, matching the GIS transformation we set explicitly.
+;; -----------------------------------------------------------------------------
+
+to setup-world-and-nodes
+  gis:load-coordinate-system (word data-dir "DA_MTL_MTM.prj")
+  let ds gis:load-dataset (word data-dir "Nodes.shp")
+  let env gis:envelope-of ds
+  set patch-m patch-size-m
+  set env-minx item 0 env - 500
+  set env-miny item 2 env - 500
+  let w ceiling ((item 1 env + 500 - env-minx) / patch-m)
+  let h ceiling ((item 3 env + 500 - env-miny) / patch-m)
+  resize-world 0 (w - 1) 0 (h - 1)
+  set-patch-size 800 / w
+  gis:set-transformation (list env-minx (env-minx + w * patch-m) env-miny (env-miny + h * patch-m))
+                         (list -0.5 (w - 0.5) -0.5 (h - 0.5))
+  ask patches [ set lane-ids [] ]
+
+  set node-table table:make
+  foreach gis:feature-list-of ds [ f ->
+    let loc gis:location-of first first gis:vertex-lists-of f
+    create-nodes 1 [
+      set node-id gis:property-value f "NODEID"
+      setxy item 0 loc item 1 loc
+      set hidden? true
+      table:put node-table node-id who
+    ]
+  ]
+  print (word "  " count nodes " nodes, world " world-width " x " world-height " patches of " patch-m " m")
+end
+
+to-report x->mtm [x]
+  report env-minx + (x + 0.5) * patch-m
+end
+
+to-report y->mtm [y]
+  report env-miny + (y + 0.5) * patch-m
+end
+
+to-report mtm->x [v]
+  report (v - env-minx) / patch-m - 0.5
+end
+
+to-report mtm->y [v]
+  report (v - env-miny) / patch-m - 0.5
+end
+
+;; -----------------------------------------------------------------------------
+;; Networks (osmnx.graph_from_gdfs)
+;; Every graph contains all nodes, as in osmnx; a node's index is its `who`
+;; (nodes are the first turtles created). Each network is stored as forward and
+;; backward adjacency arrays: item i is a flat list [j1 t1 j2 t2 ...] of
+;; neighbours and travel times. NetLogo links are not used: creating a link in
+;; NetLogo 7 costs time proportional to the number of existing links, which makes
+;; ~1.1 million links impractical (see PORTING_NOTES.md). Parallel edges and
+;; self-loops are kept as is; Dijkstra naturally uses the cheapest parallel edge,
+;; like networkx on a MultiDiGraph.
+;; -----------------------------------------------------------------------------
+
+to load-edges [file mode]
+  let ds gis:load-dataset (word data-dir file)
+  let n count nodes
+  let fwd array:from-list n-values n [ [] ]
+  let bwd array:from-list n-values n [ [] ]
+  let n-edges 0
+  let n-skipped 0
+  foreach gis:feature-list-of ds [ f ->
+    let u table:get-or-default node-table (gis:property-value f "U") -1
+    let v table:get-or-default node-table (gis:property-value f "V") -1
+    ifelse u < 0 or v < 0 [ set n-skipped n-skipped + 1 ] [
+      let tt gis:property-value f "TRV_TIME"
+      array:set fwd u lput tt (lput v array:item fwd u)
+      array:set bwd v lput tt (lput u array:item bwd v)
+      set n-edges n-edges + 1
+    ]
+  ]
+  table:put networks mode (list fwd bwd)
+  set max-edges max list max-edges n-edges
+  print (word "  " mode ": " n-edges " edges (" n-skipped " with unknown nodes skipped)")
+end
+
+;; -----------------------------------------------------------------------------
+;; Spatial look-ups replacing osmnx.nearest_nodes and scipy KDTrees.
+;; Growing in-radius search around the patch containing (x, y). The patch centre
+;; is at most 0.71 patch from (x, y), so once the best candidate lies within
+;; r - 0.71 of the point it is the exact nearest agent of the set.
+;; -----------------------------------------------------------------------------
+
+to-report nearest-in [aset x y]
+  let p patch x y
+  let r 2
+  loop [
+    let cands [aset in-radius r] of p
+    if any? cands [
+      let best min-one-of cands [distancexy x y]
+      if [distancexy x y] of best <= r - 0.71 [ report best ]
+    ]
+    set r r * 2
+  ]
+end
+
+to-report nearest-node [x y]
+  report nearest-in nodes x y
+end
+
+;; -----------------------------------------------------------------------------
+;; STM stops: each stop gets the network node nearest to it (model constructor).
+;; -----------------------------------------------------------------------------
+
+to load-stm-stops
+  let ds gis:load-dataset (word data-dir "STM_MTM.shp")
+  foreach gis:feature-list-of ds [ f ->
+    let loc gis:location-of first first gis:vertex-lists-of f
+    if not empty? loc [ create-stm-stops 1 [ setxy item 0 loc item 1 loc  set hidden? true ] ]
+  ]
+  ask stm-stops [ set stop-node nearest-node xcor ycor ]
+  print (word "  " count stm-stops " stops")
+end
+
+;; closest_candidate_node: the STM stop nearest to the coordinates of a network
+;; node, reported as that stop's own network node.
+to-report closest-stop-node [n]
+  report [stop-node] of nearest-in stm-stops ([xcor] of n) ([ycor] of n)
+end
+
+;; -----------------------------------------------------------------------------
+;; Bike lanes: polylines are split into segments, and each segment is indexed
+;; on the patches it crosses, so the exact point-to-polyline distance (what
+;; shapely's nearest + distance computes) only looks at nearby segments.
+;; -----------------------------------------------------------------------------
+
+to load-bikelanes
+  let ds gis:load-dataset (word data-dir "VQ_bikelanes.shp")
+  set lane-segs []
+  foreach gis:feature-list-of ds [ f ->
+    foreach gis:vertex-lists-of f [ part ->
+      let pts filter [ l -> not empty? l ] map [ v -> gis:location-of v ] part
+      if length pts >= 2 [
+        (foreach but-last pts but-first pts [ [a b] -> add-lane-segment a b ])
+      ]
+    ]
+  ]
+  print (word "  " length lane-segs " bike-lane segments")
+end
+
+to add-lane-segment [a b]
+  let idx length lane-segs
+  set lane-segs lput (sentence a b) lane-segs
+  let del-x item 0 b - item 0 a
+  let del-y item 1 b - item 1 a
+  ;; sample every 0.25 patch: every point of the segment is within 0.125 of a sample
+  let n max list 1 ceiling ((sqrt (del-x * del-x + del-y * del-y)) / 0.25)
+  foreach range (n + 1) [ k ->
+    ask patch (item 0 a + del-x * k / n) (item 1 a + del-y * k / n) [
+      if not member? idx lane-ids [ set lane-ids lput idx lane-ids ]
+    ]
+  ]
+end
+
+;; Exact distance (metres) from (x, y) to the nearest bike-lane segment.
+;; A segment at distance d has a sample within d + 0.125 of the point, lying in a
+;; patch whose centre is within d + 0.125 + 0.71 of the point, i.e. within
+;; d + 1.55 of the start patch centre. So the minimum found within radius r is
+;; exact as soon as it is <= r - 1.6.
+to-report nearest-lane-distance [x y]
+  let p patch x y
+  let r 3
+  loop [
+    let ids remove-duplicates reduce sentence fput [] [lane-ids] of ([patches in-radius r] of p)
+    if not empty? ids [
+      let d min map [ i -> segment-distance x y item i lane-segs ] ids
+      if d <= r - 1.6 [ report d * patch-m ]
+    ]
+    set r r * 2
+  ]
+end
+
+to-report segment-distance [x y s]
+  let x1 item 0 s
+  let y1 item 1 s
+  let del-x item 2 s - x1
+  let del-y item 3 s - y1
+  let l2 del-x * del-x + del-y * del-y
+  let u ifelse-value l2 = 0 [ 0 ] [ max list 0 (min list 1 (((x - x1) * del-x + (y - y1) * del-y) / l2)) ]
+  let ex x - x1 - u * del-x
+  let ey y - y1 - u * del-y
+  report sqrt (ex * ex + ey * ey)
+end
+
+;; -----------------------------------------------------------------------------
+;; Workplaces: 1.3M points, read from the slim x/y export written once by
+;; prep_workplaces.ps1 (the original .dbf is 705 MB of unused attributes).
+;; Kept as two coordinate lists (MTM metres); no turtles.
+;; -----------------------------------------------------------------------------
+
+to load-workplaces
+  let f workplaces-file
+  if not file-exists? f [
+    error (word "Missing " f ". Run prep_workplaces.ps1 once (see PORTING_NOTES.md).")
+  ]
+  set wp-x []
+  set wp-y []
+  file-open f
+  while [ not file-at-end? ] [
+    set wp-x lput file-read wp-x
+    set wp-y lput file-read wp-y
+  ]
+  file-close
+  print (word "  " length wp-x " workplaces")
+end
+
+;; -----------------------------------------------------------------------------
+;; Census (cell 7). One table per DA row of `montreal_da`, in census order.
+;; -----------------------------------------------------------------------------
+
+to load-census
+  let gender-share load-gender
+  let das-by-uid load-da-polygons
+
+  let rows but-first but-first csv:from-file (word data-dir "Census_data.csv") ;; header, CMA total (iloc[1:])
+  set da-rows []
+  let n-dropped 0
+  foreach rows [ r ->
+    ;; COL14 is dropped before dropna
+    ifelse member? "" (remove-item 14 r) [ set n-dropped n-dropped + 1 ] [
+      let uid as-number item 0 r
+      let inc-counts map [ c -> item c r ] [3 4 5 6 7 8 9 10 11 12 13 15 16]
+      let pop-with-income sum inc-counts
+      ;; shares of the 12 income brackets (income_no_total is recomputed as 1 - sum)
+      let inc-shares map [ v -> safe-div v pop-with-income ] but-first inc-counts
+      let c15-30 item 22 r + item 23 r
+      let commuters c15-30 + item 24 r + item 25 r + item 26 r
+      let male table:get-or-default gender-share uid false
+      let base (list
+        (list "DA_name" uid)
+        (list "Car" item 17 r) (list "Transit" item 18 r) (list "Walk" item 19 r) (list "Bike" item 20 r)
+        (list "income_shares" inc-shares)
+        (list "commute_time_30_45" safe-div (item 24 r) commuters)
+        (list "commute_time_45_60" safe-div (item 25 r) commuters)
+        (list "commute_time_more_60" safe-div (item 26 r) commuters)
+        (list "Male" male))
+      ;; right join with the DA polygons: one row per matching polygon, or one row without geometry
+      let feats table:get-or-default das-by-uid uid []
+      ifelse empty? feats
+        [ set da-rows lput table:from-list (lput (list "feature" nobody) base) da-rows ]
+        [ foreach feats [ f -> set da-rows lput table:from-list (lput (list "feature" f) base) da-rows ] ]
+    ]
+  ]
+  print (word "  " length da-rows " DA rows (" n-dropped " census rows dropped by dropna, "
+              length filter [ d -> table:get d "feature" = nobody ] da-rows " without polygon)")
+end
+
+;; Gender.csv: drop Population, dropna, Male share = Male / (Male + Female)
+to-report load-gender
+  let result table:make
+  foreach but-first csv:from-file (word data-dir "Gender.csv") [ r ->
+    let kept (list item 0 r item 2 r item 3 r)
+    if not member? "" kept [
+      table:put result (as-number item 0 r) safe-div (item 2 r) (item 2 r + item 3 r)
+    ]
+  ]
+  report result
+end
+
+to-report load-da-polygons
+  set da-dataset gis:load-dataset (word data-dir "DA_MTL_MTM.shp")
+  let result table:make
+  foreach gis:feature-list-of da-dataset [ f ->
+    let uid gis:property-value f "UID_12"
+    table:put result uid lput f table:get-or-default result uid []
+  ]
+  report result
+end
+
+to-report as-number [v]
+  report ifelse-value is-string? v [ read-from-string v ] [ v ]
+end
+
+;; pandas would give NaN on 0/0; such DAs never receive agents in the Python
+;; run (it would crash), so 0 is a safe stand-in that keeps NetLogo running.
+to-report safe-div [a b]
+  report ifelse-value b = 0 [ 0 ] [ a / b ]
+end
+
+;; -----------------------------------------------------------------------------
+;; Residential parcels: one hidden turtle per polygon, at its centroid (JTS
+;; centroid = shapely centroid). Network nodes are computed lazily, only for
+;; parcels that actually host an agent.
+;; -----------------------------------------------------------------------------
+
+to load-residences
+  let ds gis:load-dataset (word data-dir "Residential_MTM.shp")
+  let i 0
+  foreach gis:feature-list-of ds [ f ->
+    let c gis:location-of gis:centroid-of f
+    let env gis:envelope-of f
+    create-residences 1 [
+      set res-id i
+      set res-feature f
+      set res-node nobody
+      setxy item 0 c item 1 c
+      set x-m x->mtm xcor
+      set y-m y->mtm ycor
+      ;; full envelope diagonal: every point of the polygon is within this of the centroid
+      set res-diag sqrt ((item 1 env - item 0 env) ^ 2 + (item 3 env - item 2 env) ^ 2)
+      set hidden? true
+    ]
+    set i i + 1
+  ]
+  print (word "  " count residences " residential parcels")
+end
+
+;; residential.intersects(DA polygon), as in create_agents. Spatial prefilter on
+;; centroid distance, then the exact JTS intersection test.
+to match-residences-to-das
+  let small-limit 1000
+  let big residences with [ res-diag > small-limit ]
+  foreach da-rows [ da ->
+    let f table:get da "feature"
+    let hits []
+    if f != nobody [
+      let env gis:envelope-of f
+      let cx (item 0 env + item 1 env) / 2
+      let cy (item 2 env + item 3 env) / 2
+      let half-diag 0.5 * sqrt ((item 1 env - item 0 env) ^ 2 + (item 3 env - item 2 env) ^ 2)
+      let p patch (mtm->x cx) (mtm->y cy)
+      let near [residences in-radius ((half-diag + small-limit) / patch-m + 0.71)] of p
+      let cands (turtle-set near big)
+      set hits filter [ r -> gis:intersects? [res-feature] of r f ] sort cands
+    ]
+    table:put da "res" hits
+  ]
+  print (word "  " length filter [ d -> not empty? table:get d "res" ] da-rows " DAs with residential parcels")
+end
+
+;; Network node of a residential parcel (computed on first use)
+to-report residence-node [r]
+  if [res-node] of r = nobody [ ask r [ set res-node nearest-node xcor ycor ] ]
+  report [res-node] of r
+end

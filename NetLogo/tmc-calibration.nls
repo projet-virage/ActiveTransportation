@@ -1,0 +1,202 @@
+;; =============================================================================
+;; tmc-calibration.nls -- objective function, parameter search, betas I/O
+;; Python reference: calibration_error (cell 20) and the Optuna study (cell 21).
+;; =============================================================================
+
+;; Coefficient order, as in compute_mode_choice and Betas_HighComplexity.npy
+to-report beta-names
+  report ["b1" "b2" "b3" "b4" "b5" "b6" "b7"
+          "b8" "b9" "b10" "b11" "b12" "b13" "b14"
+          "b15" "b16" "b17" "b18" "b19" "b20" "b21" "b22"
+          "b23" "b24" "b25" "b26" "b27" "b28" "b29"
+          "gamma_bike" "ASC_auto" "ASC_transit" "ASC_bike"]
+end
+
+;; Search bounds of the Optuna study (same order)
+to-report beta-bounds
+  report [
+    [-2 -0.05] [-1.5 0] [-1.5 1.5] [0 1.5] [-1.5 0] [-1 0] [-1 0]                  ;; auto
+    [-2 -0.05] [0 1.5] [-1.5 1.5] [-1.5 0] [0 1.5] [-1 0] [-1 0]                   ;; transit
+    [-2 -0.05] [-1.5 0] [-1.5 1.5] [-1.5 0] [0 1.5] [-1.5 -0.01] [-1 0] [-1 0]     ;; bike
+    [-2 -0.05] [-1.5 0] [-1.5 1.5] [-1.5 0] [0 1.5] [-1 0] [-1 0]                  ;; walk
+    [0 2.5]                                                                        ;; peer effect
+    [-3 3] [-3 5] [-5 3]                                                           ;; ASCs (walk = reference)
+  ]
+end
+
+;; Stand-in for np.inf
+to-report infinite-error
+  report 1.0E300
+end
+
+;; -----------------------------------------------------------------------------
+;; calibration_error(betas, model, n_steps, save_results)
+;; Weighted DA-level MSE of mode shares (weight = observed agents in the DA),
+;; blended with the MSE of the global shares: 0.2 local + 0.8 global.
+;; -----------------------------------------------------------------------------
+
+to-report calibration-error [b save?]
+  reset-trial-state
+  set betas b
+  let t-start timer
+  set social-interaction? false
+  model-step
+  set social-interaction? true
+  repeat n-steps - 1 [ model-step ]
+  print (word "Execution time for " n-steps " steps: " precision (timer - t-start) 4 " seconds")
+  color-persons
+
+  let sim compute-mode-shares
+  let total-error 0
+  let total-weight 0
+  let observed-global [0 0 0 0]
+  let simulated-global [0 0 0 0]
+  let records []
+
+  foreach da-rows [ da ->
+    let uid table:get da "DA_name"
+    let car table:get da "Car"
+    let transit table:get da "Transit"
+    let bike table:get da "Bike"
+    let walk table:get da "Walk"
+    if not (car = 0 and transit = 0 and bike = 0 and walk = 0)
+       and table:has-key? agents-by-da uid and table:has-key? sim uid [
+      let observed map [ v -> py-round (v / n-rep) ] (list car transit bike walk)
+      let simulated table:get sim uid
+      set observed-global (map + observed-global observed)
+      set simulated-global (map + simulated-global simulated)
+      let obs-total sum observed
+      let sim-total sum simulated
+      if obs-total != 0 and sim-total != 0 [
+        let share-error mean (map [ [o s] -> (o / obs-total - s / sim-total) ^ 2 ] observed simulated)
+        set total-error total-error + obs-total * share-error
+        set total-weight total-weight + obs-total
+        if save? [ set records lput (sentence uid observed simulated share-error) records ]
+      ]
+    ]
+  ]
+
+  if total-weight = 0 or sum observed-global = 0 or sum simulated-global = 0 [ report infinite-error ]
+
+  let local-error total-error / total-weight
+  let obs-share map [ v -> v / sum observed-global ] observed-global
+  let sim-share map [ v -> v / sum simulated-global ] simulated-global
+  let global-share-error mean (map [ [o s] -> (o - s) ^ 2 ] obs-share sim-share)
+  let final-error 0.2 * local-error + 0.8 * global-share-error
+
+  if save? [
+    csv:to-file "output/DA_calibration_results.csv"
+      fput ["DA_name" "Obs_Auto" "Obs_Transit" "Obs_Bike" "Obs_Walk"
+            "Sim_Auto" "Sim_Transit" "Sim_Bike" "Sim_Walk" "Error"] records
+    print ""
+    print (word "Observed totals: " observed-global)
+    print (word "Simulated totals: " simulated-global)
+    print (word "Observed global: " sum observed-global)
+    print (word "Simulated global: " sum simulated-global)
+    print (word "Observed modal shares: " map [ v -> precision v 3 ] obs-share)
+    print (word "Simulated modal shares: " map [ v -> precision v 3 ] sim-share)
+    print (word "Local error: " local-error)
+    print (word "Global share error: " global-share-error)
+    print (word "Final objective: " final-error)
+    plot-observed-simulated observed-global simulated-global
+  ]
+  set last-error final-error
+  report final-error
+end
+
+to plot-observed-simulated [observed simulated]
+  set-current-plot "Observed vs simulated"
+  clear-plot
+  foreach range 4 [ i ->
+    set-current-plot-pen "observed"
+    plotxy i item i observed
+    set-current-plot-pen "simulated"
+    plotxy (i + 0.4) item i simulated
+  ]
+end
+
+;; Score the current coefficients and save the DA results (button / experiments)
+to evaluate-betas
+  require-betas
+  let err calibration-error betas true
+end
+
+;; -----------------------------------------------------------------------------
+;; Parameter search (replaces the Optuna TPE study, see PORTING_NOTES.md):
+;; n-startup uniform random trials in the bounds (Optuna's TPE also starts with
+;; 10 random trials), then Gaussian perturbations of the best point so far
+;; (sigma = 10 % of each range, clipped to the bounds).
+;; -----------------------------------------------------------------------------
+
+to calibrate
+  let history []
+  let best false
+  let best-error 0
+  set-current-plot "Calibration MSE"
+  clear-plot
+  foreach range n-trials [ trial ->
+    let candidate ifelse-value (trial < n-startup or best = false) [ random-betas ] [ perturb-betas best ]
+    let err calibration-error candidate false
+    if best = false or err < best-error [
+      set best candidate
+      set best-error err
+    ]
+    set history lput (sentence trial err candidate) history
+    set-current-plot "Calibration MSE"
+    set-current-plot-pen "trial"
+    plotxy trial err
+    set-current-plot-pen "best"
+    plotxy trial best-error
+    print "-----------------------------"
+    print (word "Trial: " trial "   MSE: " precision err 6 "   best: " precision best-error 6)
+  ]
+  csv:to-file "output/calibration_history.csv" fput (sentence "trial" "mse" beta-names) history
+
+  ;; check convergence of the mode choices with the best coefficients
+  set betas best
+  reset-trial-state
+  let previous false
+  foreach range 5 [ s ->
+    set social-interaction? s > 0
+    model-step
+    let current map [ a -> [mode-choice] of a ] sort persons
+    if previous != false [
+      let changed length filter [ x -> x ] (map [ [c p] -> c != p ] current previous)
+      print (word "Step " (s + 1) ": " precision (100 * changed / length current) 2 "% of agents changed mode")
+    ]
+    set previous current
+  ]
+
+  let final-error calibration-error best true
+  print "=============================="
+  print "Optimization finished"
+  print (word "Best MSE: " best-error)
+  print (word "Optimized coefficients: " best)
+  save-betas "output/betas_HighComplexity.csv"
+end
+
+to-report random-betas
+  report map [ bd -> first bd + random-float (last bd - first bd) ] beta-bounds
+end
+
+to-report perturb-betas [b]
+  report (map [ [v bd] ->
+    max list first bd (min list last bd (v + random-normal 0 (0.1 * (last bd - first bd))))
+  ] b beta-bounds)
+end
+
+;; -----------------------------------------------------------------------------
+;; Coefficients files: CSV with header "name,value", 33 rows
+;; -----------------------------------------------------------------------------
+
+to load-betas
+  let rows but-first csv:from-file betas-file
+  if length rows != 33 [ error (word betas-file " must contain 33 coefficients") ]
+  set betas map last rows
+  print (word "Loaded coefficients from " betas-file)
+end
+
+to save-betas [file]
+  csv:to-file file fput ["name" "value"] (map list beta-names betas)
+  print (word "Coefficients saved to " file)
+end

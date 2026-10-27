@@ -1,3 +1,6 @@
 .vscode/
 data/
 .env
+NetLogo/derived/
+NetLogo/output/*
+!NetLogo/output/.gitkeep

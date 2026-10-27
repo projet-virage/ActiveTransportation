@@ -1,0 +1,130 @@
+;; =============================================================================
+;; tmc-relocation.nls -- relocation experiment (notebook cell 23)
+;; A share of the agents get a new random home anywhere and a new workplace;
+;; mode choices before and after are compared. DA membership and peers are
+;; kept, as in Python. The population is modified: run setup-population again
+;; before another experiment.
+;; =============================================================================
+
+to run-relocation-experiment
+  require-betas
+  let agents sort persons
+  let n length agents
+
+  print "========== BASELINE SIMULATION =========="
+  let baseline run-and-collect agents
+  let baseline-counts count-modes baseline
+  print (word "Baseline counts: " baseline-counts)
+
+  let selected n-of (int (relocation-fraction * n)) persons
+  let sample-size count selected
+  print (word "Agents selected for relocation: " sample-size)
+
+  reset-timer
+  ask selected [
+    set relocated? true
+    let old home-res
+    let new-res old
+    if count residences > 1 [
+      while [ new-res = old ] [ set new-res one-of residences ]
+    ]
+    set home-res new-res
+    set work-x false
+    set work-y false
+    set work-node nobody
+    set work-stm-node nobody
+    if work-spot != nobody [
+      ask work-spot [ die ]
+      set work-spot nobody
+    ]
+    assign-nodes
+  ]
+  log-step "agents relocated"
+
+  print "Updating local population density..."
+  assign-local-population-density
+
+  print "Recalculating travel times for relocated agents..."
+  ask selected [ clear-travel-times ]
+  compute-all-travel-times sort selected
+
+  print "Updating static calibration data..."
+  prepare-static-calibration-data
+
+  print "========== POST-RELOCATION SIMULATION =========="
+  let after run-and-collect agents
+  let after-counts count-modes after
+  print (word "Post-relocation counts: " after-counts)
+
+  ;; ---- comparison
+  print "========== COMPARISON =========="
+  let labels ["Auto" "Transit" "Bike" "Walk"]
+  let rows []
+  print "Mode      Before  After  Difference  Before_share  After_share  Change_pp"
+  (foreach labels baseline-counts after-counts [ [lbl b a] ->
+    let row (list lbl b a (a - b) (b / n) (a / n) (100 * (a - b) / n))
+    set rows lput row rows
+    print (word lbl "  " b "  " a "  " (a - b) "  " precision (b / n) 3 "  "
+                precision (a / n) 3 "  " precision (100 * (a - b) / n) 3)
+  ])
+  csv:to-file "output/relocation_comparison.csv"
+    fput ["Mode" "Before" "After" "Difference" "Before_share" "After_share" "Change_pp"] rows
+
+  ;; transition matrix: rows = before, columns = after
+  let matrix map [ m1 -> map [ m2 ->
+    length filter [ x -> x ] (map [ [b a] -> b = m1 and a = m2 ] baseline after) ] mode-names ] mode-names
+  print "Transportation mode transition matrix (rows: before, columns: after; auto transit bike walk):"
+  (foreach mode-names matrix [ [m r] -> print (word m ": " r) ])
+  csv:to-file "output/relocation_transitions.csv"
+    fput (fput "Before/After" mode-names) (map [ [m r] -> fput m r ] mode-names matrix)
+
+  let changed (map [ [b a] -> b != a ] baseline after)
+  let relocated-flags map [ a -> [relocated?] of a ] agents
+  let n-changed length filter [ x -> x ] changed
+  let n-reloc-changed length filter [ x -> x ] (map [ [c r] -> c and r ] changed relocated-flags)
+  let n-other-changed n-changed - n-reloc-changed
+  print (word "Agents changing transportation mode: " n-changed)
+  print (word "Percentage changing transportation mode: " precision (100 * n-changed / n) 2 " %")
+  print (word "Relocated agents changing mode: " n-reloc-changed)
+  print (word "Percentage of relocated agents changing mode: "
+              precision (100 * n-reloc-changed / max list 1 sample-size) 2 " %")
+  print (word "Non-relocated agents changing mode: " n-other-changed)
+  print (word "Percentage of non-relocated agents changing mode: "
+              precision (100 * n-other-changed / max list 1 (n - sample-size)) 2 " %")
+
+  plot-relocation baseline-counts after-counts n
+end
+
+;; run_transport_simulation: reset, n-steps, choices in `agents` order
+to-report run-and-collect [agents]
+  reset-trial-state
+  let t-start timer
+  foreach range n-steps [ s ->
+    set social-interaction? s > 0
+    model-step
+  ]
+  print (word "Execution time for " n-steps " steps: " precision (timer - t-start) 3 " seconds")
+  color-persons
+  report map [ a -> [mode-choice] of a ] agents
+end
+
+to-report count-modes [choices]
+  report map [ m -> length filter [ c -> c = m ] choices ] mode-names
+end
+
+to plot-relocation [before after n]
+  set-current-plot "Relocation: mode counts"
+  clear-plot
+  foreach range 4 [ i ->
+    set-current-plot-pen "before"
+    plotxy i item i before
+    set-current-plot-pen "after"
+    plotxy (i + 0.4) item i after
+  ]
+  set-current-plot "Relocation: change in share (pp)"
+  clear-plot
+  foreach range 4 [ i ->
+    set-current-plot-pen "change"
+    plotxy i 100 * (item i after - item i before) / n
+  ]
+end

@@ -1,0 +1,230 @@
+;; =============================================================================
+;; tmc-travel.nls -- network travel times
+;; Python reference: TransportModel._batch_shortest and compute_all_travel_times.
+;; osmnx.routing.shortest_path calls networkx's bidirectional Dijkstra for each
+;; (origin, destination) pair; the same algorithm is implemented below on the
+;; adjacency arrays built in tmc-data.nls. A missing path is `false` (NaN in
+;; Python), which makes the mode unavailable.
+;; =============================================================================
+
+;; agents: list of persons
+to compute-all-travel-times [agents]
+  print "[1/4] Computing car travel times..."
+  let tt shortest-times "car" map [ a -> list [home-node] of a [work-node] of a ] agents
+  (foreach agents tt [ [a v] -> ask a [ set time-car v  set auto-available? is-number? v ] ])
+  log-step "car travel times"
+
+  print "[2/4] Computing walking travel times..."
+  set tt shortest-times "walk" map [ a -> list [home-node] of a [work-node] of a ] agents
+  (foreach agents tt [ [a v] -> ask a [ set time-walk v  set walk-available? is-number? v ] ])
+  log-step "walking travel times"
+
+  print "[3/4] Computing STM travel times..."
+  ;; home -> nearest STM stop (walk network)
+  set tt shortest-times "walk" map [ a -> list [home-node] of a [home-stm-node] of a ] agents
+  let valid []
+  (foreach agents tt [ [a v] ->
+    ask a [ set time-home-stm v  set transit-available? false ]
+    if is-number? v [ set valid lput a valid ]
+  ])
+  ;; home stop -> work stop (transit network)
+  let valid2 []
+  if not empty? valid [
+    set tt shortest-times "transit" map [ a -> list [home-stm-node] of a [work-stm-node] of a ] valid
+    (foreach valid tt [ [a v] ->
+      ask a [ set time-stm-stm v ]
+      if is-number? v [ set valid2 lput a valid2 ]
+    ])
+  ]
+  ;; work stop -> workplace (walk network)
+  if not empty? valid2 [
+    set tt shortest-times "walk" map [ a -> list [work-stm-node] of a [work-node] of a ] valid2
+    (foreach valid2 tt [ [a v] ->
+      ask a [
+        set time-stm-work v
+        if is-number? v [ set transit-available? true ]
+      ]
+    ])
+  ]
+  log-step "STM travel times"
+
+  print "[4/4] Computing BIKE travel times..."
+  set tt shortest-times "bike" map [ a -> list [home-node] of a [work-node] of a ] agents
+  (foreach agents tt [ [a v] -> ask a [ set time-bike v  set bike-available? is-number? v ] ])
+  log-step "bike travel times"
+end
+
+;; Travel time for each [origin destination] node pair on network `net`.
+;; Results are cached per network for the whole session (caches survive new
+;; populations and relocations, as Python's caches survive within a model).
+;; Pairs with a missing node (agent without workplace) report false.
+to-report shortest-times [net pairs]
+  let cache table:get path-caches net
+  let missing table:make
+  foreach pairs [ p ->
+    if not member? nobody p [
+      let k od-key p
+      if not table:has-key? cache k and not table:has-key? missing k [ table:put missing k p ]
+    ]
+  ]
+  let n-todo table:length missing
+  let n-done 0
+  let t-start timer
+  foreach table:values missing [ p ->
+    table:put cache (od-key p) network-distance net [who] of first p [who] of last p
+    set n-done n-done + 1
+    if n-done mod 2000 = 0 [
+      print (word "    " net ": " n-done " / " n-todo " paths (" precision (timer - t-start) 1 " s)")
+    ]
+  ]
+  report map [ p -> ifelse-value member? nobody p [ false ] [ table:get cache od-key p ] ] pairs
+end
+
+;; node indices (who) are < 1e6
+to-report od-key [p]
+  report [who] of first p * 1000000 + [who] of last p
+end
+
+;; -----------------------------------------------------------------------------
+;; Bidirectional Dijkstra (as networkx's _bidirectional_dijkstra)
+;; Search state lives in arrays allocated once; "seen" and "done" arrays hold
+;; the id of the query that last touched a node, so nothing needs resetting
+;; between queries. Each direction has a binary heap (keys, nodes, size).
+;; -----------------------------------------------------------------------------
+
+to init-path-search
+  let n count nodes
+  set dist-f array:from-list n-values n [ 0 ]
+  set dist-b array:from-list n-values n [ 0 ]
+  set seen-f array:from-list n-values n [ 0 ]
+  set seen-b array:from-list n-values n [ 0 ]
+  set done-f array:from-list n-values n [ 0 ]
+  set done-b array:from-list n-values n [ 0 ]
+  ;; a node is pushed at most once per relaxed edge, plus the source
+  set heap-key-f array:from-list n-values (max-edges + 2) [ 0 ]
+  set heap-node-f array:from-list n-values (max-edges + 2) [ 0 ]
+  set heap-key-b array:from-list n-values (max-edges + 2) [ 0 ]
+  set heap-node-b array:from-list n-values (max-edges + 2) [ 0 ]
+  set heap-size-f array:from-list [ 0 ]
+  set heap-size-b array:from-list [ 0 ]
+  set query-id 0
+end
+
+;; Shortest travel time from node index s to node index t, or false.
+to-report network-distance [net s t]
+  if s = t [ report 0 ]
+  let adj table:get networks net
+  let fwd first adj
+  let bwd last adj
+  let no-path 1.0E300
+  set query-id query-id + 1
+  let q query-id
+  array:set heap-size-f 0 0
+  array:set heap-size-b 0 0
+  array:set dist-f s 0
+  array:set seen-f s q
+  heap-push heap-key-f heap-node-f heap-size-f 0 s
+  array:set dist-b t 0
+  array:set seen-b t q
+  heap-push heap-key-b heap-node-b heap-size-b 0 t
+  let mu no-path   ;; best complete path found so far
+  loop [
+    let top-f ifelse-value array:item heap-size-f 0 > 0 [ array:item heap-key-f 0 ] [ no-path ]
+    let top-b ifelse-value array:item heap-size-b 0 > 0 [ array:item heap-key-b 0 ] [ no-path ]
+    if top-f + top-b >= mu [ report ifelse-value mu < no-path [ mu ] [ false ] ]
+    ifelse top-f <= top-b [
+      let v array:item heap-node-f 0
+      heap-pop heap-key-f heap-node-f heap-size-f
+      if array:item done-f v != q [
+        array:set done-f v q
+        let nb array:item fwd v
+        let m length nb
+        let i 0
+        while [ i < m ] [
+          let w item i nb
+          let nd top-f + item (i + 1) nb
+          if array:item seen-f w != q or nd < array:item dist-f w [
+            array:set seen-f w q
+            array:set dist-f w nd
+            heap-push heap-key-f heap-node-f heap-size-f nd w
+          ]
+          if array:item seen-b w = q [
+            let total nd + array:item dist-b w
+            if total < mu [ set mu total ]
+          ]
+          set i i + 2
+        ]
+      ]
+    ] [
+      let v array:item heap-node-b 0
+      heap-pop heap-key-b heap-node-b heap-size-b
+      if array:item done-b v != q [
+        array:set done-b v q
+        let nb array:item bwd v
+        let m length nb
+        let i 0
+        while [ i < m ] [
+          let w item i nb
+          let nd top-b + item (i + 1) nb
+          if array:item seen-b w != q or nd < array:item dist-b w [
+            array:set seen-b w q
+            array:set dist-b w nd
+            heap-push heap-key-b heap-node-b heap-size-b nd w
+          ]
+          if array:item seen-f w = q [
+            let total nd + array:item dist-f w
+            if total < mu [ set mu total ]
+          ]
+          set i i + 2
+        ]
+      ]
+    ]
+  ]
+end
+
+;; Binary min-heap stored in arrays; hs is a one-element array holding the size.
+to heap-push [hk hv hs key val]
+  let i array:item hs 0
+  array:set hs 0 (i + 1)
+  let moving true
+  while [ moving and i > 0 ] [
+    let p int ((i - 1) / 2)
+    let pk array:item hk p
+    ifelse pk > key [
+      array:set hk i pk
+      array:set hv i array:item hv p
+      set i p
+    ] [
+      set moving false
+    ]
+  ]
+  array:set hk i key
+  array:set hv i val
+end
+
+to heap-pop [hk hv hs]
+  let n array:item hs 0 - 1
+  array:set hs 0 n
+  if n = 0 [ stop ]
+  let key array:item hk n
+  let val array:item hv n
+  let i 0
+  let moving true
+  while [ moving ] [
+    let c 2 * i + 1
+    ifelse c >= n [
+      set moving false
+    ] [
+      if c + 1 < n and array:item hk (c + 1) < array:item hk c [ set c c + 1 ]
+      ifelse array:item hk c < key [
+        array:set hk i array:item hk c
+        array:set hv i array:item hv c
+        set i c
+      ] [
+        set moving false
+      ]
+    ]
+  ]
+  array:set hk i key
+  array:set hv i val
+end
