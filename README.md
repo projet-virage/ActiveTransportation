@@ -92,19 +92,7 @@ Home → Workplace
 
 The trip is divided into three components:
 
-Home
-
-↓
-
-Nearest STM Station
-
-↓
-
-Destination STM Station
-
-↓
-
-Workplace
+Home → Nearest STM Station → Destination STM Station → Workplace
 
 Travel time is the sum of all three segments.
 
@@ -112,19 +100,7 @@ Travel time is the sum of all three segments.
 
 The cycling trip is divided into three components:
 
-Home
-
-↓
-
-Nearest BIXI Station
-
-↓
-
-Destination BIXI Station
-
-↓
-
-Workplace
+Home → Nearest BIXI Station → Destination BIXI Station → Workplace
 
 Travel time is the sum of these three segments.
 
