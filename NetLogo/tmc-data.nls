@@ -63,7 +63,7 @@ to setup-world-and-nodes
   let w ceiling ((item 1 env + 500 - env-minx) / patch-m)
   let h ceiling ((item 3 env + 500 - env-miny) / patch-m)
   resize-world 0 (w - 1) 0 (h - 1)
-  set-patch-size 800 / w
+  set-patch-size 1000 / w
   gis:set-transformation (list env-minx (env-minx + w * patch-m) env-miny (env-miny + h * patch-m))
                          (list -0.5 (w - 0.5) -0.5 (h - 0.5))
   ask patches [ set lane-ids [] ]
