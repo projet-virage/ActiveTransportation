@@ -4,3 +4,4 @@ data/
 NetLogo/derived/
 NetLogo/output/*
 !NetLogo/output/.gitkeep
+.claude/
