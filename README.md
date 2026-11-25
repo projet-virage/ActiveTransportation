@@ -10,6 +10,12 @@ Commuters are represented as heterogeneous agents with distinct demographic and 
 
 Following calibration, the model is used to investigate how residential and workplace relocation can affect commuting decisions. Three relocation scenarios are considered, in which 10%, 20%, and 30% of the agent population experience changes in their residential and workplace locations. These experiments allow us to examine how changes in location, travel times, accessibility, and social interactions may influence individual mode choices and aggregate commuting patterns.
 
+Partially based on the following paper:
+
+>[Aziz, H. A., Park, B. H., Morton, A., Stewart, R. N., Hilliard, M., & Maness, M. (2018). A high resolution agent-based model to support walk-bicycle infrastructure investment decisions: A case study with New York City. Transportation research part C: emerging technologies, 86, 280-299.](https://doi.org/10.1016/j.trc.2017.11.008)
+
+
+
 ---
 
 ## Research Objectives
