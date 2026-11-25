@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository contains the implementation of a spatially explicit transportation agent-based model (ABM) developed to investigate commuting mode choices across the Island of Montréal, Canada. The model examines how individual socioeconomic characteristics, built-environment conditions, and social interactions shape commuting decisions, and how changes in residential and workplace locations may influence travel behaviour and the overall distribution of transportation modes.
+This repository contains the implementation of a spatially explicit transportation agent-based model (ABM) developed to investigate commuting mode choices across the Island of Montreal, Canada. The model examines how individual socioeconomic characteristics, built-environment conditions, and social interactions shape commuting decisions, and how changes in residential and workplace locations may influence travel behaviour and the overall distribution of transportation modes.
 
 The modeling framework follows a progressive, three-configuration approach. It begins by examining commuting choices based on individual socioeconomic characteristics, then introduces built-environment attributes, and finally incorporates social interactions to explore their additional influence on cycling decisions. This stepwise structure makes it possible to assess how the inclusion of different behavioral and contextual factors affects the model's ability to reproduce observed commuting patterns.
 
