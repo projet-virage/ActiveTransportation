@@ -6,16 +6,7 @@ This repository contains the implementation of a spatially explicit transportati
 
 The modeling framework follows a progressive, three-configuration approach. It begins by examining commuting choices based on individual socioeconomic characteristics, then incorporates built-environment attributes, and finally introduces social interactions to explore their additional influence on cycling decisions. This stepwise structure makes it possible to assess how the inclusion of different behavioral and contextual factors affects the model's ability to reproduce observed commuting patterns.
 
-Commuters are represented as heterogeneous agents with distinct demographic and socioeconomic characteristics. Each agent makes a commuting mode choice among four alternatives:
-
-- **Auto**
-- **Public transit**
-- **Cycling**
-- **Walking**
-
-Mode choices are simulated using a multinomial logit (MNL) framework. The utility of each available transportation alternative is calculated using relevant individual, travel-related, and contextual characteristics. The model also incorporates spatially explicit residential and workplace locations, multimodal transportation networks, and population characteristics to represent geographic differences in commuting conditions and transportation accessibility.
-
-In the final configuration, social interactions are introduced through agent-level peer networks constructed using geographic proximity and socioeconomic similarity. Peer behavior influences the utility of cycling, while the utilities of auto, public transit, and walking remain unaffected by the social-interaction term.
+Commuters are represented as heterogeneous agents with distinct demographic and socioeconomic characteristics. Each agent makes a commuting mode choice among four alternatives, namely, auto, public transit, bike, and walking. Mode choices are simulated using a multinomial logit (MNL) framework. The utility of each available transportation alternative is calculated using relevant individual, travel-related, and contextual characteristics. The model also incorporates spatially explicit residential and workplace locations, multimodal transportation networks, and population characteristics to represent geographic differences in commuting conditions and transportation accessibility. In the final configuration, social interactions are introduced through agent-level peer networks constructed using geographic proximity and socioeconomic similarity. Peer behavior influences the utility of cycling, while the utilities of auto, public transit, and walking remain unaffected by the social-interaction term.
 
 Following calibration, the model is used to investigate how residential and workplace relocation can affect commuting decisions. Three relocation scenarios are considered, in which 10%, 20%, and 30% of the agent population experience changes in their residential and workplace locations. These experiments allow us to examine how changes in location, travel times, accessibility, and social interactions may influence individual mode choices and aggregate commuting patterns.
 
@@ -35,10 +26,6 @@ The model was developed to address the following objectives:
 ## Study Area
 
 The study focuses on the Island of Montreal, Quebec, Canada. The spatial modeling framework represents the study area using Dissemination Areas (DAs), which provide a geographically detailed basis for representing population characteristics and comparing simulated commuting patterns with observed data.
-
-Residential and workplace locations are spatially represented within the study area. These locations are connected through multimodal transportation networks, allowing the model to estimate commuting conditions for auto, public transit, cycling, and walking.
-
-The DA-level spatial structure also provides the basis for examining geographic differences in commuting behavior and evaluating model performance against observed commuting patterns.
 
 ---
 
