@@ -35,7 +35,7 @@ The model was developed to address the following objectives:
 
 ## Study Area
 
-The study focuses on the Island of Montréal, Québec, Canada. The spatial modeling framework represents the study area using Dissemination Areas (DAs), which provide a geographically detailed basis for representing population characteristics and comparing simulated commuting patterns with observed data.
+The study focuses on the Island of Montreal, Quebec, Canada. The spatial modeling framework represents the study area using Dissemination Areas (DAs), which provide a geographically detailed basis for representing population characteristics and comparing simulated commuting patterns with observed data.
 
 Residential and workplace locations are spatially represented within the study area. These locations are connected through multimodal transportation networks, allowing the model to estimate commuting conditions for auto, public transit, cycling, and walking.
 
