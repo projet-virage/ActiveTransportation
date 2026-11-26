@@ -138,18 +138,13 @@ else:
     self.U_bike = -np.inf
 ```
 
-**Walking utility**
+**Walking utility** - _Reference mode_
 
 ```python
 if self.walk_available == True:
     self.U_walk = (
         β19 * self.time_walk_st
-        + β20 * self.age_st
-        + β21 * self.gender
-        + β22 * self.Education_HighSchool
-        + β23 * self.Education_BelowBachelor
-        + β24 * self.Education_Bachelor_and_above
-    )
+     )
 else:
     self.U_walk = -np.inf
 ```
@@ -227,18 +222,12 @@ else:
     self.U_bike = -np.inf
 ```
 
-**Walking utility**
+**Walking utility** - _Reference mode_
 
 ```python
 if self.walk_available == True:
     self.U_walk = (
         β25 * self.time_walk_st
-        + β26 * self.age_st
-        + β27 * self.gender
-        + β28 * self.Education_HighSchool
-        + β29 * self.Education_BelowBachelor
-        + β30 * self.Education_Bachelor_and_above
-        + β31 * self.population_density_st
     )
 else:
     self.U_walk = -np.inf
@@ -314,18 +303,12 @@ else:
     self.U_bike = -np.inf
 ```
 
-**Walking utility**
+**Walking utility** - _Reference mode_
 
 ```python
 if self.walk_available == True:
     self.U_walk = (
         β25 * self.time_walk_st
-        + β26 * self.age_st
-        + β27 * self.gender
-        + β28 * self.Education_HighSchool
-        + β29 * self.Education_BelowBachelor
-        + β30 * self.Education_Bachelor_and_above
-        + β31 * self.population_density_st
     )
 else:
     self.U_walk = -np.inf
